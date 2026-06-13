@@ -4,7 +4,6 @@ const Placement = require('../models/Placement');
 const Notification = require('../models/Notification');
 const { auth, requireRole } = require('../middleware/auth');
 
-// /stats must be before /:id
 router.get('/stats/overview', auth, async (req, res) => {
   try {
     const all = await Placement.find({ status:'completed' });
@@ -109,14 +108,12 @@ router.delete('/:id', auth, requireRole('tpo','admin'), async (req, res) => {
   } catch(err) { res.status(500).json({ success:false, message:err.message }); }
 });
 
-// SECURITY: student can only register themselves, eligibility checked server-side
 router.post('/:id/register', auth, requireRole('student'), async (req, res) => {
   try {
     const p = await Placement.findById(req.params.id);
     if (!p) return res.status(404).json({ success:false, message:'Not found.' });
     if (p.status !== 'upcoming') return res.status(400).json({ success:false, message:'Registration is closed for this drive.' });
 
-    // Server-side eligibility check
     const User = require('../models/User');
     const student = await User.findById(req.user._id);
     const e = p.eligibility || {};
@@ -132,8 +129,12 @@ router.post('/:id/register', auth, requireRole('student'), async (req, res) => {
     if (p.registeredStudents.map(s=>s.toString()).includes(req.user._id.toString()))
       return res.status(400).json({ success:false, message:'Already registered.' });
 
-    p.registeredStudents.push(req.user._id);
-    await p.save();
+    await Placement.findByIdAndUpdate(
+      req.params.id,
+      { $addToSet: { registeredStudents: req.user._id } },
+      { new: true }
+    );
+    
     res.json({ success:true, message:'Registered successfully.' });
   } catch(err) { res.status(500).json({ success:false, message:err.message }); }
 });
