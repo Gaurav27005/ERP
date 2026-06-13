@@ -1,0 +1,8 @@
+{
+  "short_name": "DYP ERP",
+  "name": "DYP College ERP",
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#0d1b4b",
+  "background_color": "#0d1b4b"
+}
