@@ -1,21 +1,23 @@
 const express = require('express');
 const router = express.Router();
+const mongoose = require('mongoose'); 
 const Note = require('../models/Note');
 const Subject = require('../models/Subject');
 const Notification = require('../models/Notification');
 const { auth, requireRole } = require('../middleware/auth');
 
-// Sanitize regex to prevent ReDoS attacks
 function escapeRegex(str) {
   return str.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
 }
 
-// /counts must be before /:id
 router.get('/counts', auth, async (req, res) => {
   try {
     const match = {};
     if (req.query.department) match.department = req.query.department;
-    if (req.query.year) match.year = parseInt(req.query.year);
+    if (req.query.year) {
+      const y = parseInt(req.query.year);
+      if (!isNaN(y) && y >= 1 && y <= 4) match.year = y;
+    }
     const agg = await Note.aggregate([{ $match:match },{ $group:{ _id:'$type', count:{ $sum:1 } } }]);
     const result = {};
     agg.forEach(c => { result[c._id] = c.count; });
@@ -27,11 +29,15 @@ router.get('/', auth, async (req, res) => {
   try {
     const filter = {};
     if (req.query.department) filter.department = req.query.department;
-    if (req.query.year)       filter.year = parseInt(req.query.year);
+    if (req.query.year) {
+      const y = parseInt(req.query.year);
+      if (!isNaN(y) && y >= 1 && y <= 4) filter.year = y;
+    }
     if (req.query.type)       filter.type = req.query.type;
-    if (req.query.subject)    filter.subject = req.query.subject;
+    if (req.query.subject) {
+      if (mongoose.isValidObjectId(req.query.subject)) filter.subject = req.query.subject;
+    }
     if (req.query.search) {
-      // SECURITY: Escape regex to prevent ReDoS
       const safe = escapeRegex(req.query.search.slice(0, 100));
       filter.$or = [
         { title:       { $regex:safe, $options:'i' } },
@@ -52,18 +58,21 @@ router.post('/', auth, requireRole('faculty','admin','tpo'), async (req, res) =>
     const { subject:subjectId, title, description, type, fileUrl, tags, unit } = req.body;
     if (!title?.trim()) return res.status(400).json({ success:false, message:'Title required.' });
     if (!subjectId) return res.status(400).json({ success:false, message:'Subject required.' });
+    
+    if (!mongoose.isValidObjectId(subjectId)) {
+      return res.status(400).json({ success:false, message:'Invalid Subject ID.' });
+    }
+
     const VALID_TYPES = ['notes','assignment','pyq','syllabus','reference','lab_manual'];
     const subDoc = await Subject.findById(subjectId);
     if (!subDoc) return res.status(400).json({ success:false, message:'Subject not found.' });
 
-    // SECURITY: Validate fileUrl is a proper URL or empty
     let safeFileUrl = '';
     if (fileUrl) {
       try {
         const u = new URL(fileUrl);
         if (['http:','https:'].includes(u.protocol)) safeFileUrl = fileUrl.slice(0,500);
       } catch(e) {
-        // Local server upload paths are allowed
         if (fileUrl.startsWith('/uploads/') || fileUrl.includes('localhost')) safeFileUrl = fileUrl.slice(0,500);
       }
     }
@@ -95,11 +104,15 @@ router.post('/', auth, requireRole('faculty','admin','tpo'), async (req, res) =>
 
 router.put('/:id', auth, requireRole('faculty','admin','tpo'), async (req, res) => {
   try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success:false, message:'Invalid Note ID.' });
+    }
+
     const note = await Note.findById(req.params.id);
     if (!note) return res.status(404).json({ success:false, message:'Not found.' });
     if (req.user.role !== 'admin' && note.uploadedBy.toString() !== req.user._id.toString())
       return res.status(403).json({ success:false, message:'Not authorized.' });
-    // SECURITY: Only allow updating safe fields, never uploadedBy/department/subject
+    
     const VALID_TYPES = ['notes','assignment','pyq','syllabus','reference','lab_manual'];
     const safeUpdate = {};
     if (req.body.title)       safeUpdate.title       = req.body.title.trim().slice(0,200);
@@ -117,6 +130,7 @@ router.put('/:id', auth, requireRole('faculty','admin','tpo'), async (req, res) 
     }
     if (req.body.unit) safeUpdate.unit = Math.min(Math.max(parseInt(req.body.unit)||1,1),8);
     if (Array.isArray(req.body.tags)) safeUpdate.tags = req.body.tags.slice(0,10).map(t=>t.slice(0,50));
+    
     const updated = await Note.findByIdAndUpdate(req.params.id, safeUpdate, { new:true })
       .populate('subject','name code').populate('uploadedBy','name role');
     res.json({ success:true, data:updated });
@@ -125,10 +139,15 @@ router.put('/:id', auth, requireRole('faculty','admin','tpo'), async (req, res) 
 
 router.delete('/:id', auth, requireRole('faculty','admin','tpo'), async (req, res) => {
   try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success:false, message:'Invalid Note ID.' });
+    }
+
     const note = await Note.findById(req.params.id);
     if (!note) return res.status(404).json({ success:false, message:'Not found.' });
     if (req.user.role !== 'admin' && note.uploadedBy.toString() !== req.user._id.toString())
       return res.status(403).json({ success:false, message:'Not authorized.' });
+      
     await Note.findByIdAndDelete(req.params.id);
     res.json({ success:true, message:'Deleted.' });
   } catch(err) { res.status(500).json({ success:false, message:err.message }); }
@@ -136,6 +155,10 @@ router.delete('/:id', auth, requireRole('faculty','admin','tpo'), async (req, re
 
 router.patch('/:id/download', auth, async (req, res) => {
   try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success:false, message:'Invalid Note ID.' });
+    }
+
     await Note.findByIdAndUpdate(req.params.id, { $inc:{ downloads:1 } });
     res.json({ success:true });
   } catch(err) { res.status(500).json({ success:false, message:err.message }); }
