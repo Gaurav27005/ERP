@@ -29,7 +29,8 @@ export default function NotesPage() {
   const emptyForm = {title:'',description:'',subject:'',type:'notes',fileUrl:'',tags:'',unit:''};
   const [form, setForm] = useState(emptyForm);
 
-  const loadData = useCallback(async () => {
+  // FIX: Added signal parameter for AbortController to prevent memory leaks and race conditions
+  const loadData = useCallback(async (signal) => {
     setLoading(true);
     try {
       const p = new URLSearchParams();
@@ -41,19 +42,37 @@ export default function NotesPage() {
       if (fDept) cp.append('department',fDept);
       if (fYear) cp.append('year',fYear);
       const subDept = fDept||user.department;
+      
       const [nr, sr, cr] = await Promise.all([
-        api.get(`/notes?${p}`),
-        api.get(`/subjects?department=${encodeURIComponent(subDept)}`),
-        api.get(`/notes/counts?${cp}`)
+        api.get(`/notes?${p}`, { signal }),
+        api.get(`/subjects?department=${encodeURIComponent(subDept)}`, { signal }),
+        api.get(`/notes/counts?${cp}`, { signal })
       ]);
       setNotes(nr.data.data||[]);
       setSubjects(sr.data.data||[]);
       setCounts(cr.data.data||{});
-    } catch(e) { toast.error('Failed to load'); }
-    setLoading(false);
+      setLoading(false);
+    } catch(e) { 
+      // FIX: Silently ignore abort errors, only toast real failures
+      if (e.name !== 'CanceledError' && e.message !== 'canceled') {
+        toast.error('Failed to load');
+        setLoading(false);
+      }
+    }
   }, [fType,fYear,fDept,search,user.department]);
 
-  useEffect(() => { loadData(); }, [loadData]);
+  // FIX: Added 300ms debounce to prevent API spam on every keystroke
+  useEffect(() => { 
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      loadData(controller.signal);
+    }, 300);
+    
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [loadData]);
 
   const openCreate = () => { setForm(emptyForm); setEditNote(null); setMode('link'); setShowModal(true); };
   const openEdit = n => { setForm({title:n.title,description:n.description||'',subject:n.subject?._id||'',type:n.type,fileUrl:n.fileUrl||'',tags:(n.tags||[]).join(', '),unit:n.unit||''}); setEditNote(n); setMode('link'); setShowModal(true); };
@@ -98,7 +117,7 @@ export default function NotesPage() {
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
         <div><h2 style={{fontSize:21,fontWeight:800}}>Study Material</h2><p style={{color:'var(--text-muted)',fontSize:13,marginTop:2}}>Notes, assignments, PYQs, syllabus and lab manuals</p></div>
         <div style={{display:'flex',gap:8}}>
-          <button className="btn btn-outline btn-sm" onClick={loadData}><RefreshCw size={13}/> Refresh</button>
+          <button className="btn btn-outline btn-sm" onClick={() => loadData()}><RefreshCw size={13}/> Refresh</button>
           {canUp&&<button className="btn btn-primary" onClick={openCreate}><Upload size={15}/> Upload</button>}
         </div>
       </div>
@@ -195,7 +214,6 @@ export default function NotesPage() {
           </div>
         </div>
       )}
-      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>
   );
 }
