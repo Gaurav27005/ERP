@@ -56,7 +56,9 @@ const ALLOWED_EXTENSIONS = new Set(['.pdf','.doc','.docx','.ppt','.pptx','.xls',
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadsDir),
   filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
+    // FIX: Strip null bytes to prevent path traversal / extension bypass (Audit Issue #22)
+    const safeOriginalName = file.originalname.replace(/\0/g, '');
+    const ext = path.extname(safeOriginalName).toLowerCase();
     cb(null, `${Date.now()}-${Math.round(Math.random()*1e9)}${ext}`);
   }
 });
@@ -65,7 +67,9 @@ const upload = multer({
   storage,
   limits: { fileSize: 25 * 1024 * 1024 }, // 25MB max
   fileFilter: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
+    // FIX: Also strip null bytes here during the filter check
+    const safeOriginalName = file.originalname.replace(/\0/g, '');
+    const ext = path.extname(safeOriginalName).toLowerCase();
     if (!ALLOWED_EXTENSIONS.has(ext) || !ALLOWED_MIME_TYPES.has(file.mimetype)) {
       return cb(new Error(`File type not allowed. Allowed: PDF, DOC, PPT, XLS, ZIP, images.`), false);
     }
@@ -86,7 +90,14 @@ app.post('/api/upload',
   (req, res) => {
     if (!req.file) return res.status(400).json({ success:false, message:'No file uploaded.' });
     const fileUrl = `${process.env.BASE_URL||'http://localhost:5000'}/uploads/${req.file.filename}`;
-    res.json({ success:true, fileUrl, fileName:req.file.originalname, fileSize:req.file.size });
+    
+    // FIX: Sanitize originalName to prevent Stored XSS when echoed back to frontend (Audit Attack #7)
+    const safeName = req.file.originalname
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/\0/g, "");
+
+    res.json({ success:true, fileUrl, fileName:safeName, fileSize:req.file.size });
   }
 );
 
@@ -116,7 +127,8 @@ app.use('/api/notices',       require('./routes/notices'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/dashboard',     require('./routes/dashboard'));
 
-app.get('/api/health', (req, res) => res.json({ status:'OK', message:'DYP ERP running', time:new Date() }));
+// FIX: Removed unauthenticated server time exposure (Audit Issue #21)
+app.get('/api/health', (req, res) => res.json({ status:'OK', message:'DYP ERP running' }));
 
 // ── Global error handler ──────────────────────────────────────────
 app.use((err, req, res, next) => {

@@ -11,6 +11,16 @@ const loginAttempts = new Map();
 const MAX_ATTEMPTS = 10;
 const WINDOW_MS = 15 * 60 * 1000; // 15 minutes
 
+// FIX: Prevent Memory Leak by garbage collecting expired IPs every 15 minutes (Audit Priority 1)
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, data] of loginAttempts.entries()) {
+    if (now > data.resetAt) {
+      loginAttempts.delete(ip);
+    }
+  }
+}, WINDOW_MS);
+
 function checkRateLimit(ip) {
   const now = Date.now();
   const data = loginAttempts.get(ip) || { count:0, resetAt: now + WINDOW_MS };
@@ -28,24 +38,42 @@ router.post('/login', async (req, res) => {
     }
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ success:false, message:'Email and password required.' });
+    
     // Limit input lengths to prevent large payload attacks
     if (email.length > 100 || password.length > 128) return res.status(400).json({ success:false, message:'Invalid input.' });
+    
     const user = await User.findOne({ email: email.toLowerCase().trim() });
-    if (!user)          return res.status(401).json({ success:false, message:'Invalid email or password.' });
+    
+    // FIX: Email Enumeration Timing Attack Prevention (Audit Attack #9)
+    // If the user doesn't exist, we run a dummy bcrypt compare to ensure 
+    // the response takes ~100ms, hiding whether the email is valid or not.
+    if (!user) {
+      let bcrypt;
+      try { bcrypt = require('bcrypt'); } catch(e) { bcrypt = require('bcryptjs'); }
+      // Valid-format dummy hash to consume constant time without crashing
+      await bcrypt.compare(password, '$2b$12$R9h/cIPz0gi.URNNX3kh2OPST9/PgBkqquzi.Ss7KIUgO2t0jWMUW');
+      return res.status(401).json({ success:false, message:'Invalid email or password.' });
+    }
+
     if (!user.isActive) return res.status(401).json({ success:false, message:'Account deactivated. Contact admin.' });
+    
     const ok = await user.comparePassword(password);
-    if (!ok)            return res.status(401).json({ success:false, message:'Invalid email or password.' });
+    if (!ok) return res.status(401).json({ success:false, message:'Invalid email or password.' });
+    
     // Clear rate limit on success
     loginAttempts.delete(ip);
     user.lastLogin = new Date();
     await user.save({ validateBeforeSave:false });
+    
     res.json({ success:true, token:sign(user._id, user.role), user:user.toJSON() });
   } catch(err) { res.status(500).json({ success:false, message:err.message }); }
 });
 
 router.get('/me', auth, async (req, res) => {
-  const user = await User.findById(req.user._id).select('-password');
-  res.json({ success:true, user });
+  try {
+    const user = await User.findById(req.user._id).select('-password');
+    res.json({ success:true, user });
+  } catch(err) { res.status(500).json({ success:false, message:err.message }); }
 });
 
 // SECURITY: Profile update only allows safe fields — role/department/email cannot be changed
@@ -55,6 +83,7 @@ router.put('/profile', auth, async (req, res) => {
     const update = {};
     if (name?.trim()) update.name = name.trim().slice(0, 100);
     if (phone !== undefined) update.phone = (phone||'').toString().slice(0, 20).replace(/[^0-9+\-() ]/g,'');
+    
     // Only students can update cgpa/backlogs
     if (req.user.role === 'student') {
       if (cgpa !== undefined) {
@@ -77,9 +106,11 @@ router.put('/change-password', auth, async (req, res) => {
     if (!currentPassword || !newPassword) return res.status(400).json({ success:false, message:'Both passwords required.' });
     if (newPassword.length < 6) return res.status(400).json({ success:false, message:'New password must be at least 6 characters.' });
     if (newPassword.length > 128) return res.status(400).json({ success:false, message:'Password too long.' });
+    
     const user = await User.findById(req.user._id);
     const ok = await user.comparePassword(currentPassword);
     if (!ok) return res.status(400).json({ success:false, message:'Current password is incorrect.' });
+    
     user.password = newPassword;
     await user.save();
     res.json({ success:true, message:'Password changed successfully.' });
